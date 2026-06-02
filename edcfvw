@@ -1,0 +1,941 @@
+local debugX = true
+
+local HttpGet = game.HttpGet or function(...) return game:HttpGet(...) end
+local ok, Rayfield = pcall(function()
+	return loadstring(HttpGet(game, 'https://sirius.menu/rayfield'))()
+end)
+if not ok or not Rayfield then
+	warn("Failed to load Rayfield:", Rayfield)
+	return
+end
+
+local Window = Rayfield:CreateWindow({
+	Name = "CJ's Player Attatchments",
+	Icon = 0,
+	LoadingTitle = "CJ's Player Attatchments",
+	LoadingSubtitle = "by TheEquinoxFox",
+	Theme = "Default",
+	DisableRayfieldPrompts = false,
+	DisableBuildWarnings = false,
+	ConfigurationSaving = {
+		Enabled = true,
+		FolderName = nil,
+		FileName = "Big Hub"
+	},
+	Discord = {
+		Enabled = false,
+		Invite = "noinvitelink",
+		RememberJoins = true
+	},
+	KeySystem = false
+})
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Heartbeat = RunService.Heartbeat
+local LocalPlayer = Players.LocalPlayer
+
+local Character, Humanoid, RootPart
+local function refreshCharacterRefs()
+	Character = LocalPlayer and (LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()) or nil
+	if Character then
+		Humanoid = Character:FindFirstChildOfClass("Humanoid") or Character:WaitForChild("Humanoid")
+		RootPart = Character:FindFirstChild("HumanoidRootPart") or Character:WaitForChild("HumanoidRootPart")
+	end
+end
+
+if LocalPlayer then
+	refreshCharacterRefs()
+	LocalPlayer.CharacterAdded:Connect(function()
+		refreshCharacterRefs()
+		if activeAttachment and activeAttachment.detach then
+			pcall(activeAttachment.detach)
+		end
+	end)
+else
+	warn("LocalPlayer is nil — run this as a LocalScript.")
+	return
+end
+
+local function safeSetHiddenProperty(obj, prop, value)
+	if type(sethiddenproperty) == "function" then
+		pcall(function()
+			sethiddenproperty(obj, prop, value)
+		end)
+	end
+end
+
+local function safeLoadAnim(humanoid, assetId)
+	local anim = Instance.new("Animation")
+	anim.AnimationId = assetId
+
+	local okLoad, track = pcall(function()
+		return humanoid:LoadAnimation(anim)
+	end)
+
+	if okLoad and track then
+		track.Looped = true
+
+		local originalPlay = track.Play
+		function track:Play(...)
+			originalPlay(self, ...)
+			if assetId == "rbxassetid://179224234" then
+				pcall(function()
+					self:AdjustSpeed(2)
+				end)
+			end
+		end
+
+		return track
+	end
+
+	return {
+		Looped = true,
+		Play = function() end,
+		Stop = function() end
+	}
+end
+
+local matchingPlayersByTab = {
+	Head = {},
+	Torso = {},
+	Arms = {},
+	Actions = {}
+}
+local activeAttachment = nil
+
+local function detachActive()
+	if activeAttachment and activeAttachment.detach then
+		pcall(activeAttachment.detach)
+	end
+	activeAttachment = nil
+end
+
+local HeadDebugPos, HeadDebugRot = Vector3.new(0,0,0), Vector3.new(0,0,0)
+local TorsoDebugPos, TorsoDebugRot = Vector3.new(0,0,0), Vector3.new(0,0,0)
+local ArmsDebugPos, ArmsDebugRot = Vector3.new(0,0,0), Vector3.new(0,0,0)
+local ActionsDebugPos, ActionsDebugRot = Vector3.new(0,0,0), Vector3.new(0,0,0)
+
+local mainTab = Window:CreateTab("Head", 4483362458)
+local torsoTab = Window:CreateTab("Torso", 4483362458)
+local armsTab = Window:CreateTab("Arms", 4483362458)
+
+local function tabKeyName(tab)
+	if tab == mainTab then return "Head" end
+	if tab == torsoTab then return "Torso" end
+	if tab == armsTab then return "Arms" end
+	return "Head"
+end
+
+local function updateMatchingForTab(tab, text)
+	local key = tabKeyName(tab)
+	local search = (text or ""):lower()
+	local t = {}
+	for _, plr in pairs(Players:GetPlayers()) do
+		local n = (plr.Name or ""):lower()
+		local d = (plr.DisplayName or ""):lower()
+		if n:find(search, 1, true) or d:find(search, 1, true) then
+			table.insert(t, plr)
+		end
+	end
+	matchingPlayersByTab[key] = t
+end
+
+mainTab:CreateSection("Search Player")
+mainTab:CreateInput({
+	Name = "Players",
+	CurrentValue = "",
+	PlaceholderText = "Search...",
+	RemoveTextAfterFocusLost = false,
+	Flag = "PlayersInput_Head",
+	Callback = function(Text)
+		updateMatchingForTab(mainTab, Text)
+	end
+})
+
+torsoTab:CreateSection("Search Player")
+torsoTab:CreateInput({
+	Name = "Players",
+	CurrentValue = "",
+	PlaceholderText = "Search...",
+	RemoveTextAfterFocusLost = false,
+	Flag = "PlayersInput_Torso",
+	Callback = function(Text)
+		updateMatchingForTab(torsoTab, Text)
+	end
+})
+
+armsTab:CreateSection("Search Player")
+armsTab:CreateInput({
+	Name = "Players",
+	CurrentValue = "",
+	PlaceholderText = "Search...",
+	RemoveTextAfterFocusLost = false,
+	Flag = "PlayersInput_Arms",
+	Callback = function(Text)
+		updateMatchingForTab(armsTab, Text)
+	end
+})
+
+local function createAttachmentToggle(tab, displayName, flagName, positionOffset, rotationOffset, sitAnimationId)
+	local conn, TargetHead, TargetPlayer, animTracks
+	local active = false
+
+	local function getCFrameOffset()
+		local posDebug, rotDebug
+		if tab == mainTab then
+			posDebug, rotDebug = HeadDebugPos, HeadDebugRot
+		elseif tab == torsoTab then
+			posDebug, rotDebug = TorsoDebugPos, TorsoDebugRot
+		elseif tab == armsTab then
+			posDebug, rotDebug = ArmsDebugPos, ArmsDebugRot
+		else
+			posDebug, rotDebug = HeadDebugPos, HeadDebugRot
+		end
+
+		local totalRot = Vector3.new(
+			(rotationOffset.X or 0) + (rotDebug and rotDebug.X or 0),
+			(rotationOffset.Y or 0) + (rotDebug and rotDebug.Y or 0),
+			(rotationOffset.Z or 0) + (rotDebug and rotDebug.Z or 0)
+		)
+		local totalPos = (positionOffset or Vector3.new(0,0,0)) + (posDebug or Vector3.new(0,0,0))
+
+		return CFrame.new(totalPos) * CFrame.Angles(
+			math.rad(totalRot.X),
+			math.rad(totalRot.Y),
+			math.rad(totalRot.Z)
+		)
+	end
+
+	local function detach()
+		if conn then conn:Disconnect() conn = nil end
+		TargetHead = nil
+		TargetPlayer = nil
+
+		if animTracks then
+			for _, t in ipairs(animTracks) do
+				pcall(function() if t and t.Stop then t:Stop() end end)
+			end
+			animTracks = nil
+		end
+
+		if RootPart then
+			safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", nil)
+			RootPart.AssemblyLinearVelocity = Vector3.zero
+			RootPart.AssemblyAngularVelocity = Vector3.zero
+		end
+
+		if Humanoid then
+			Humanoid.PlatformStand = false
+		end
+
+		active = false
+		if activeAttachment and activeAttachment.detach == detach then
+			activeAttachment = nil
+		end
+	end
+
+	local function normalizeAnimList(raw)
+		if type(raw) == "string" then
+			return { raw }
+		elseif type(raw) ~= "table" then
+			return {}
+		end
+		if #raw >= 2 and type(raw[1]) == "string" and type(raw[2]) == "number" and (#raw == 2 or type(raw[3]) ~= "string") then
+			return { { raw[1], raw[2] } }
+		end
+		return raw
+	end
+
+	local function attach(player)
+		if not player or not player.Character then return end
+
+		if active and TargetPlayer == player then
+			detach()
+			return
+		end
+
+		if activeAttachment and activeAttachment.detach ~= detach then
+			detachActive()
+		end
+
+		refreshCharacterRefs()
+		if not Humanoid or not RootPart then return end
+
+		local head = player.Character:FindFirstChild("Head")
+		if not head then return end
+
+		TargetHead = head
+		TargetPlayer = player
+		active = true
+
+		local ids = normalizeAnimList(sitAnimationId)
+		animTracks = {}
+
+		for _, entry in ipairs(ids) do
+			local id, speed
+			if type(entry) == "table" then
+				id = entry[1]
+				speed = entry[2]
+			else
+				id = entry
+			end
+			if type(id) == "string" then
+				pcall(function()
+					local track = safeLoadAnim(Humanoid, id)
+					pcall(function() if track and track.Priority then track.Priority = Enum.AnimationPriority.Action end end)
+					if track then
+						if type(speed) == "number" then
+							pcall(function() track.PlaybackSpeed = speed end)
+						end
+						table.insert(animTracks, track)
+						pcall(function() track:Play() end)
+						if type(speed) == "number" then
+							pcall(function() track.PlaybackSpeed = speed end)
+						end
+					end
+				end)
+			end
+		end
+
+		pcall(function() Humanoid.PlatformStand = true end)
+
+		conn = Heartbeat:Connect(function()
+			if not TargetHead or not TargetHead.Parent then
+				detach()
+				return
+			end
+
+			local desiredCFrame = TargetHead.CFrame * getCFrameOffset()
+			RootPart.CFrame = desiredCFrame
+			safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", TargetHead)
+			RootPart.AssemblyLinearVelocity = Vector3.zero
+			RootPart.AssemblyAngularVelocity = Vector3.zero
+		end)
+
+		activeAttachment = { detach = detach }
+	end
+
+	tab:CreateToggle({
+		Name = displayName,
+		CurrentValue = false,
+		Flag = flagName,
+		Callback = function(v)
+			local key = tabKeyName(tab)
+			local list = matchingPlayersByTab[key] or {}
+			if v and list[1] then
+				attach(list[1])
+			else
+				detach()
+			end
+		end
+	})
+end
+
+local function createTorsoAttachmentToggle(tab, displayName, flagName, positionOffset, rotationOffset, sitAnimationId)
+	local conn, TargetTorsoPart, TargetPlayer, animTracks
+	local active = false
+
+	local function getCFrameOffset()
+		local posDebug, rotDebug
+		if tab == mainTab then
+			posDebug, rotDebug = HeadDebugPos, HeadDebugRot
+		elseif tab == torsoTab then
+			posDebug, rotDebug = TorsoDebugPos, TorsoDebugRot
+		elseif tab == armsTab then
+			posDebug, rotDebug = ArmsDebugPos, ArmsDebugRot
+		else
+			posDebug, rotDebug = TorsoDebugPos, TorsoDebugRot
+		end
+
+		local totalRot = Vector3.new(
+			(rotationOffset.X or 0) + (rotDebug and rotDebug.X or 0),
+			(rotationOffset.Y or 0) + (rotDebug and rotDebug.Y or 0),
+			(rotationOffset.Z or 0) + (rotDebug and rotDebug.Z or 0)
+		)
+		local totalPos = (positionOffset or Vector3.new(0,0,0)) + (posDebug or Vector3.new(0,0,0))
+
+		return CFrame.new(totalPos) * CFrame.Angles(
+			math.rad(totalRot.X),
+			math.rad(totalRot.Y),
+			math.rad(totalRot.Z)
+		)
+	end
+
+	local function detach()
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+
+		TargetTorsoPart = nil
+		TargetPlayer = nil
+
+		if animTracks then
+			for _, t in ipairs(animTracks) do
+				pcall(function() if t and t.Stop then t:Stop() end end)
+			end
+			animTracks = nil
+		end
+
+		if RootPart then
+			pcall(function()
+				safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", nil)
+				RootPart.AssemblyLinearVelocity = Vector3.zero
+				RootPart.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+
+		if Humanoid then
+			pcall(function() Humanoid.PlatformStand = false end)
+		end
+
+		active = false
+		if activeAttachment and activeAttachment.detach == detach then
+			activeAttachment = nil
+		end
+	end
+
+	local function normalizeAnimList(raw)
+		if type(raw) == "string" then
+			return { raw }
+		elseif type(raw) ~= "table" then
+			return {}
+		end
+		if #raw >= 2 and type(raw[1]) == "string" and type(raw[2]) == "number" and (#raw == 2 or type(raw[3]) ~= "string") then
+			return { { raw[1], raw[2] } }
+		end
+		return raw
+	end
+
+	local function attach(player)
+		if not player or not player.Character then return end
+
+		if active and TargetPlayer == player then
+			detach()
+			return
+		end
+
+		if activeAttachment and activeAttachment.detach ~= detach then
+			detachActive()
+		end
+
+		refreshCharacterRefs()
+		if not Humanoid or not RootPart then return end
+
+		local torsoPart = player.Character:FindFirstChild("Torso") or player.Character:FindFirstChild("UpperTorso")
+		if not torsoPart then
+			warn("createTorsoAttachmentToggle: target has no Torso/UpperTorso")
+			return
+		end
+
+		TargetTorsoPart = torsoPart
+		TargetPlayer = player
+		active = true
+
+		local ids = normalizeAnimList(sitAnimationId)
+		animTracks = {}
+
+		for _, entry in ipairs(ids) do
+			local id, speed
+			if type(entry) == "table" then
+				id = entry[1]
+				speed = entry[2]
+			else
+				id = entry
+			end
+			if type(id) == "string" then
+				pcall(function()
+					local track = safeLoadAnim(Humanoid, id)
+					pcall(function() if track and track.Priority then track.Priority = Enum.AnimationPriority.Action end end)
+					if track then
+						if type(speed) == "number" then
+							pcall(function() track.PlaybackSpeed = speed end)
+						end
+						table.insert(animTracks, track)
+						pcall(function() track:Play() end)
+						if type(speed) == "number" then
+							pcall(function() track.PlaybackSpeed = speed end)
+						end
+					end
+				end)
+			end
+		end
+
+		pcall(function() Humanoid.PlatformStand = true end)
+
+		conn = Heartbeat:Connect(function()
+			if not TargetTorsoPart or not TargetTorsoPart.Parent then
+				detach()
+				return
+			end
+
+			local desiredCFrame = TargetTorsoPart.CFrame * getCFrameOffset()
+			RootPart.CFrame = desiredCFrame
+			pcall(function() safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", TargetTorsoPart) end)
+			pcall(function()
+				RootPart.AssemblyLinearVelocity = Vector3.zero
+				RootPart.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end)
+
+		activeAttachment = { detach = detach }
+	end
+
+	tab:CreateToggle({
+		Name = displayName,
+		CurrentValue = false,
+		Flag = flagName,
+		Callback = function(v)
+			local key = tabKeyName(tab)
+			local list = matchingPlayersByTab[key] or {}
+			if v and list[1] then
+				attach(list[1])
+			else
+				detach()
+			end
+		end
+	})
+end
+
+local function createArmAttachmentToggle(tab, displayName, flagName, side, positionOffset, rotationOffset, sitAnimationId)
+	local conn, TargetArmPart, TargetPlayer, animTracks
+	local active = false
+
+	local function getCFrameOffset()
+		local posDebug, rotDebug
+		if tab == mainTab then
+			posDebug, rotDebug = HeadDebugPos, HeadDebugRot
+		elseif tab == torsoTab then
+			posDebug, rotDebug = TorsoDebugPos, TorsoDebugRot
+		elseif tab == armsTab then
+			posDebug, rotDebug = ArmsDebugPos, ArmsDebugRot
+		else
+			posDebug, rotDebug = ArmsDebugPos, ArmsDebugRot
+		end
+
+		local totalRot = Vector3.new(
+			(rotationOffset.X or 0) + (rotDebug and rotDebug.X or 0),
+			(rotationOffset.Y or 0) + (rotDebug and rotDebug.Y or 0),
+			(rotationOffset.Z or 0) + (rotDebug and rotDebug.Z or 0)
+		)
+		local totalPos = (positionOffset or Vector3.new(0,0,0)) + (posDebug or Vector3.new(0,0,0))
+
+		return CFrame.new(totalPos) * CFrame.Angles(
+			math.rad(totalRot.X),
+			math.rad(totalRot.Y),
+			math.rad(totalRot.Z)
+		)
+	end
+
+	local function detach()
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+
+		TargetArmPart = nil
+		TargetPlayer = nil
+
+		if animTracks then
+			for _, t in ipairs(animTracks) do
+				pcall(function() if t and t.Stop then t:Stop() end end)
+			end
+			animTracks = nil
+		end
+
+		if RootPart then
+			pcall(function()
+				safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", nil)
+				RootPart.AssemblyLinearVelocity = Vector3.zero
+				RootPart.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+
+		if Humanoid then
+			pcall(function() Humanoid.PlatformStand = false end)
+		end
+
+		active = false
+		if activeAttachment and activeAttachment.detach == detach then
+			activeAttachment = nil
+		end
+	end
+
+	local function normalizeAnimList(raw)
+		if type(raw) == "string" then
+			return { raw }
+		elseif type(raw) ~= "table" then
+			return {}
+		end
+		if #raw >= 2 and type(raw[1]) == "string" and type(raw[2]) == "number" and (#raw == 2 or type(raw[3]) ~= "string") then
+			return { { raw[1], raw[2] } }
+		end
+		return raw
+	end
+
+	local function findArmPartOnCharacter(char, sideName)
+		local candidates = {}
+		if sideName == "Left" then
+			candidates = { "LeftHand", "Left Arm", "LeftLowerArm", "LeftUpperArm" }
+		else
+			candidates = { "RightHand", "Right Arm", "RightLowerArm", "RightUpperArm" }
+		end
+		for _, name in ipairs(candidates) do
+			local p = char:FindFirstChild(name)
+			if p and p:IsA("BasePart") then
+				return p
+			end
+		end
+		return nil
+	end
+
+	local function attach(player)
+		if not player or not player.Character then return end
+
+		if active and TargetPlayer == player then
+			detach()
+			return
+		end
+
+		if activeAttachment and activeAttachment.detach ~= detach then
+			detachActive()
+		end
+
+		refreshCharacterRefs()
+		if not Humanoid or not RootPart then return end
+
+		local armPart = findArmPartOnCharacter(player.Character, side)
+		if not armPart then
+			warn("createArmAttachmentToggle: target has no arm/hand for side:", side)
+			return
+		end
+
+		TargetArmPart = armPart
+		TargetPlayer = player
+		active = true
+
+		local ids = normalizeAnimList(sitAnimationId)
+		animTracks = {}
+
+		for _, entry in ipairs(ids) do
+			local id, speed
+			if type(entry) == "table" then
+				id = entry[1]
+				speed = entry[2]
+			else
+				id = entry
+			end
+			if type(id) == "string" then
+				pcall(function()
+					local track = safeLoadAnim(Humanoid, id)
+					pcall(function() if track and track.Priority then track.Priority = Enum.AnimationPriority.Action end end)
+					if track then
+						if type(speed) == "number" then
+							pcall(function() track.PlaybackSpeed = speed end)
+						end
+						table.insert(animTracks, track)
+						pcall(function() track:Play() end)
+						if type(speed) == "number" then
+							pcall(function() track.PlaybackSpeed = speed end)
+						end
+					end
+				end)
+			end
+		end
+
+		pcall(function() Humanoid.PlatformStand = true end)
+
+		conn = Heartbeat:Connect(function()
+			if not TargetArmPart or not TargetArmPart.Parent then
+				detach()
+				return
+			end
+
+			local desiredCFrame = TargetArmPart.CFrame * getCFrameOffset()
+			RootPart.CFrame = desiredCFrame
+			pcall(function() safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", TargetArmPart) end)
+			pcall(function()
+				RootPart.AssemblyLinearVelocity = Vector3.zero
+				RootPart.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end)
+
+		activeAttachment = { detach = detach }
+	end
+
+	tab:CreateToggle({
+		Name = displayName,
+		CurrentValue = false,
+		Flag = flagName,
+		Callback = function(v)
+			local key = tabKeyName(tab)
+			local list = matchingPlayersByTab[key] or {}
+			if v and list[1] then
+				attach(list[1])
+			else
+				detach()
+			end
+		end
+	})
+end
+
+mainTab:CreateSection("Head Attachments")
+createAttachmentToggle(mainTab, "Head Sit Front", "HeadSitFront", Vector3.new(0,2,0.5), Vector3.new(0,0,0), "rbxassetid://179224234")
+createAttachmentToggle(mainTab, "Head Sit Back", "HeadSitBack", Vector3.new(0,2,-0.5), Vector3.new(0,180,0), "rbxassetid://179224234")
+createAttachmentToggle(mainTab, "Head Sit Up", "HeadSitUp", Vector3.new(0,1,0), Vector3.new(-90,180,0), "rbxassetid://179224234")
+createAttachmentToggle(mainTab, "Head Sit Down", "HeadSitDown", Vector3.new(0,1,0), Vector3.new(90,180,0), "rbxassetid://0000000")
+createAttachmentToggle(mainTab, "Head Stand Front", "HeadStandFront", Vector3.new(0,3.5,0), Vector3.new(0,0,0), "rbxassetid://0000000")
+createAttachmentToggle(mainTab, "Head Stand Back", "HeadStandBack", Vector3.new(0,3.5,0), Vector3.new(0,180,0), "rbxassetid://0000000")
+createAttachmentToggle(mainTab, "Cover Face", "CoverFaceToggle", Vector3.new(0,-1.5,-1), Vector3.new(0,180,0), "rbxassetid://0000000")
+createAttachmentToggle(mainTab, "Inside Head", "InsideHeadToggle", Vector3.new(0,0,0), Vector3.new(0,0,0), "rbxassetid://179224234")
+
+torsoTab:CreateSection("Torso Attachments")
+createTorsoAttachmentToggle(torsoTab, "Backpack", "Attach_Backpack", Vector3.new(0,0,1), Vector3.new(0,180,0), "rbxassetid://179224234")
+createTorsoAttachmentToggle(torsoTab, "Hug Front", "Attach_HugFront", Vector3.new(0,0,-1), Vector3.new(0,180,0), { "rbxassetid://283545583", "rbxassetid://225975820" })
+createTorsoAttachmentToggle(torsoTab, "Hug Back", "Attach_HugBack", Vector3.new(0,0,1), Vector3.new(0,0,0), { "rbxassetid://283545583", "rbxassetid://225975820" })
+createTorsoAttachmentToggle(torsoTab, "Shoulder Front", "Attach_ShoulderFront", Vector3.new(0,1.7,0.7), Vector3.new(0,0,0), "rbxassetid://179224234")
+createTorsoAttachmentToggle(torsoTab, "Shoulder Back", "Attach_ShoulderSitBack", Vector3.new(0,1.7,-0.7), Vector3.new(0,180,0), "rbxassetid://179224234")
+createTorsoAttachmentToggle(torsoTab, "Carry Back", "Attach_CarryBack", Vector3.new(0,0,1), Vector3.new(0,0,30), { "rbxassetid://179224234", "rbxassetid://225975820" })
+createTorsoAttachmentToggle(torsoTab, "Carry Front", "Attach_CarryFront", Vector3.new(0,0,-1), Vector3.new(0,180,30), { "rbxassetid://179224234", "rbxassetid://225975820" })
+createTorsoAttachmentToggle(torsoTab, "Stand Back", "Attach_StandBack", Vector3.new(0,0,3), Vector3.new(0,0,0), "rbxassetid://0000000")
+createTorsoAttachmentToggle(torsoTab, "Stand Front", "Attach_StandFront", Vector3.new(0,0,-3), Vector3.new(0,180,0), "rbxassetid://0000000")
+
+-- Stand Behind Far (hold key, customizable)
+do
+	local conn, TargetTorsoPart, TargetPlayer, animTracks
+	local active = false
+	local keyHeld = false
+	local toggleArmed = false
+	local boundKey = Enum.KeyCode.E
+
+	local inputBeganConn, inputEndedConn
+
+	local function detach()
+		if conn then conn:Disconnect() conn = nil end
+		TargetTorsoPart = nil
+		TargetPlayer = nil
+
+		if animTracks then
+			for _, t in ipairs(animTracks) do
+				pcall(function() if t and t.Stop then t:Stop() end end)
+			end
+			animTracks = nil
+		end
+
+		if RootPart then
+			pcall(function()
+				safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", nil)
+				RootPart.AssemblyLinearVelocity = Vector3.zero
+				RootPart.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+
+		if Humanoid then
+			pcall(function() Humanoid.PlatformStand = false end)
+		end
+
+		active = false
+		if activeAttachment and activeAttachment.detach == detach then
+			activeAttachment = nil
+		end
+	end
+
+	local function attach()
+		local list = matchingPlayersByTab["Torso"] or {}
+		local player = list[1]
+		if not player or not player.Character then return end
+
+		if activeAttachment and activeAttachment.detach ~= detach then
+			detachActive()
+		end
+
+		refreshCharacterRefs()
+		if not Humanoid or not RootPart then return end
+
+		local torsoPart = player.Character:FindFirstChild("Torso")
+			or player.Character:FindFirstChild("UpperTorso")
+		if not torsoPart then return end
+
+		TargetTorsoPart = torsoPart
+		TargetPlayer = player
+		active = true
+		animTracks = {}
+
+		pcall(function() Humanoid.PlatformStand = true end)
+
+		conn = Heartbeat:Connect(function()
+			if not TargetTorsoPart or not TargetTorsoPart.Parent then
+				detach()
+				return
+			end
+
+			local offset = CFrame.new(
+				Vector3.new(0, 0, 5) + TorsoDebugPos
+			) * CFrame.Angles(
+				math.rad(TorsoDebugRot.X),
+				math.rad(TorsoDebugRot.Y),
+				math.rad(TorsoDebugRot.Z)
+			)
+
+			RootPart.CFrame = TargetTorsoPart.CFrame * offset
+			pcall(function() safeSetHiddenProperty(RootPart, "PhysicsRepRootPart", TargetTorsoPart) end)
+			pcall(function()
+				RootPart.AssemblyLinearVelocity = Vector3.zero
+				RootPart.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end)
+
+		activeAttachment = { detach = detach }
+	end
+
+	local function rebindKey(newKey)
+		if inputBeganConn then inputBeganConn:Disconnect() inputBeganConn = nil end
+		if inputEndedConn then inputEndedConn:Disconnect() inputEndedConn = nil end
+
+		boundKey = newKey
+		keyHeld = false
+		if active then detach() end
+
+		inputBeganConn = UserInputService.InputBegan:Connect(function(input, processed)
+			if processed then return end
+			if input.KeyCode == boundKey then
+				keyHeld = true
+				if toggleArmed then attach() end
+			end
+		end)
+
+		inputEndedConn = UserInputService.InputEnded:Connect(function(input)
+			if input.KeyCode == boundKey then
+				keyHeld = false
+				if active then detach() end
+			end
+		end)
+	end
+
+	rebindKey(Enum.KeyCode.E)
+
+	torsoTab:CreateSection("Stand Behind Far")
+
+	torsoTab:CreateInput({
+		Name = "Hold Key (default: E)",
+		CurrentValue = "E",
+		PlaceholderText = "e.g. E, F, G, LeftShift...",
+		RemoveTextAfterFocusLost = false,
+		Flag = "StandBehindFarKeyInput",
+		Callback = function(text)
+			local trimmed = text:match("^%s*(.-)%s*$")
+			local okKey, keyCode = pcall(function()
+				return Enum.KeyCode[trimmed]
+			end)
+			if okKey and keyCode then
+				rebindKey(keyCode)
+			end
+		end
+	})
+
+	torsoTab:CreateToggle({
+		Name = "Stand Behind Far (Hold Key)",
+		CurrentValue = false,
+		Flag = "Attach_StandBehindFar",
+		Callback = function(v)
+			toggleArmed = v
+			if not v and active then
+				detach()
+			end
+			if v and keyHeld then
+				attach()
+			end
+		end
+	})
+end
+
+armsTab:CreateSection("Arms Attachments")
+createArmAttachmentToggle(armsTab, "Carry Left", "Arms_CarryLeft", "Left", Vector3.new(0,-1.5,0), Vector3.new(90,180,180), "rbxassetid://0000000")
+createArmAttachmentToggle(armsTab, "Carry Right", "Arms_CarryRight", "Right", Vector3.new(0,-1.5,0), Vector3.new(90,180,180), "rbxassetid://0000000")
+createArmAttachmentToggle(armsTab, "Carry Left Up", "Arms_CarryLeftUp", "Left", Vector3.new(0,-1.5,0), Vector3.new(90,0,180), "rbxassetid://0000000")
+createArmAttachmentToggle(armsTab, "Carry Right Up", "Arms_CarryRightUp", "Right", Vector3.new(0,-1.5,0), Vector3.new(90,0,180), "rbxassetid://0000000")
+createArmAttachmentToggle(armsTab, "Head Carry Left", "Arms_HeadCarryLeft", "Left", Vector3.new(0,-3,0), Vector3.new(0,-90,0), "rbxassetid://0000000")
+createArmAttachmentToggle(armsTab, "Head Carry Right", "Arms_HeadCarryRight", "Right", Vector3.new(0,-3,0), Vector3.new(0,90,0), "rbxassetid://0000000")
+createArmAttachmentToggle(armsTab, "Legs Carry Left", "Arms_LegsCarryLeft", "Left", Vector3.new(0,-4,0), Vector3.new(0,-90,180), "rbxassetid://0000000")
+createArmAttachmentToggle(armsTab, "Legs Carry Right", "Arms_LegsCarryRight", "Right", Vector3.new(0,-4,0), Vector3.new(0,90,180), "rbxassetid://0000000")
+
+local function createDebugControlsForTab(tab, title)
+	tab:CreateSection(title .. " Debug")
+	local offsetLabel
+	pcall(function()
+		offsetLabel = tab:CreateLabel({
+			Text = string.format("Pos: (%.2f, %.2f, %.2f)  Rot: (%.1f, %.1f, %.1f)", 0,0,0, 0,0,0)
+		})
+	end)
+
+	local plusX, plusY, plusZ = 0,0,0
+	local minusX, minusY, minusZ = 0,0,0
+	local plusRotX, plusRotY, plusRotZ = 0,0,0
+	local minusRotX, minusRotY, minusRotZ = 0,0,0
+
+	local function recalc()
+		local pos = Vector3.new((plusX or 0) - (minusX or 0), (plusY or 0) - (minusY or 0), (plusZ or 0) - (minusZ or 0))
+		local rot = Vector3.new((plusRotX or 0) - (minusRotX or 0), (plusRotY or 0) - (minusRotY or 0), (plusRotZ or 0) - (minusRotZ or 0))
+
+		if tab == mainTab then
+			HeadDebugPos, HeadDebugRot = pos, rot
+		elseif tab == torsoTab then
+			TorsoDebugPos, TorsoDebugRot = pos, rot
+		elseif tab == armsTab then
+			ArmsDebugPos, ArmsDebugRot = pos, rot
+		end
+
+		if offsetLabel and offsetLabel.SetText then
+			pcall(function()
+				offsetLabel:SetText(string.format("Pos: (%.2f, %.2f, %.2f)  Rot: (%.1f, %.1f, %.1f)",
+					pos.X, pos.Y, pos.Z, rot.X, rot.Y, rot.Z))
+			end)
+		end
+	end
+
+	tab:CreateSection("+ XYZ")
+	local sPlusX, sPlusY, sPlusZ
+	pcall(function()
+		sPlusX = tab:CreateSlider({ Name = "+ X", Range = { 0, 10 }, Increment = 0.1, CurrentValue = 0, Callback = function(v) plusX = v or 0; recalc() end })
+		sPlusY = tab:CreateSlider({ Name = "+ Y", Range = { 0, 10 }, Increment = 0.1, CurrentValue = 0, Callback = function(v) plusY = v or 0; recalc() end })
+		sPlusZ = tab:CreateSlider({ Name = "+ Z", Range = { 0, 10 }, Increment = 0.1, CurrentValue = 0, Callback = function(v) plusZ = v or 0; recalc() end })
+	end)
+
+	tab:CreateSection("- XYZ")
+	local sMinusX, sMinusY, sMinusZ
+	pcall(function()
+		sMinusX = tab:CreateSlider({ Name = "- X", Range = { 0, 10 }, Increment = 0.1, CurrentValue = 0, Callback = function(v) minusX = v or 0; recalc() end })
+		sMinusY = tab:CreateSlider({ Name = "- Y", Range = { 0, 10 }, Increment = 0.1, CurrentValue = 0, Callback = function(v) minusY = v or 0; recalc() end })
+		sMinusZ = tab:CreateSlider({ Name = "- Z", Range = { 0, 10 }, Increment = 0.1, CurrentValue = 0, Callback = function(v) minusZ = v or 0; recalc() end })
+	end)
+
+	tab:CreateSection("+ Rotations")
+	local sPlusRX, sPlusRY, sPlusRZ
+	pcall(function()
+		sPlusRX = tab:CreateSlider({ Name = "+ Rot X", Range = { 0, 180 }, Increment = 1, CurrentValue = 0, Callback = function(v) plusRotX = v or 0; recalc() end })
+		sPlusRY = tab:CreateSlider({ Name = "+ Rot Y", Range = { 0, 180 }, Increment = 1, CurrentValue = 0, Callback = function(v) plusRotY = v or 0; recalc() end })
+		sPlusRZ = tab:CreateSlider({ Name = "+ Rot Z", Range = { 0, 180 }, Increment = 1, CurrentValue = 0, Callback = function(v) plusRotZ = v or 0; recalc() end })
+	end)
+
+	tab:CreateSection("- Rotations")
+	local sMinusRX, sMinusRY, sMinusRZ
+	pcall(function()
+		sMinusRX = tab:CreateSlider({ Name = "- Rot X", Range = { 0, 180 }, Increment = 1, CurrentValue = 0, Callback = function(v) minusRotX = v or 0; recalc() end })
+		sMinusRY = tab:CreateSlider({ Name = "- Rot Y", Range = { 0, 180 }, Increment = 1, CurrentValue = 0, Callback = function(v) minusRotY = v or 0; recalc() end })
+		sMinusRZ = tab:CreateSlider({ Name = "- Rot Z", Range = { 0, 180 }, Increment = 1, CurrentValue = 0, Callback = function(v) minusRotZ = v or 0; recalc() end })
+	end)
+
+	for _, s in pairs({sPlusX, sPlusY, sPlusZ, sMinusX, sMinusY, sMinusZ, sPlusRX, sPlusRY, sPlusRZ, sMinusRX, sMinusRY, sMinusRZ}) do
+		if s and s.SetValue then pcall(function() s:SetValue(0) end) end
+	end
+
+	recalc()
+end
+
+createDebugControlsForTab(mainTab, "Head")
+createDebugControlsForTab(torsoTab, "Torso")
+createDebugControlsForTab(armsTab, "Arms")
+
+print("[CJ Attachments] UI created.")
